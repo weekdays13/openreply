@@ -1,0 +1,128 @@
+# yaml-language-server: $schema=https://render.com/schema/render.yaml.json
+# Paid services; review costs before creating the Blueprint. See docs/deploy-render.md.
+# Native Node runtime deliberately ignores the repository's Dockerfile.
+previews:
+  generation: off
+
+services:
+  - type: web
+    name: openreply-web
+    runtime: node
+    region: frankfurt
+    plan: 0.5c-512mb
+    autoDeployTrigger: off
+    buildCommand: npm ci --include=dev && npm run build
+    preDeployCommand: npm run db:migrate
+    startCommand: npm run start -- --hostname 0.0.0.0 --port "$PORT"
+    # /api/health also requires a worker heartbeat. Avoid a deployment dependency cycle.
+    healthCheckPath: /login
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: openreply-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: openreply-keyvalue
+          property: connectionString
+      - key: NEXTAUTH_URL
+        fromService:
+          type: web
+          name: openreply-web
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: NEXTAUTH_SECRET
+        generateValue: true
+      - key: CRON_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        sync: false # Exactly 64 hexadecimal characters; not generateValue (base64).
+      - key: EMAIL_FROM
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: ALLOWED_EMAILS
+        sync: false
+      - key: META_GRAPH_API_VERSION
+        value: v25.0
+      - key: INSTAGRAM_APP_ID
+        sync: false
+      - key: INSTAGRAM_APP_SECRET
+        sync: false
+      - key: FACEBOOK_APP_SECRET
+        sync: false
+      - key: WEBHOOK_VERIFY_TOKEN
+        generateValue: true
+
+  - type: worker
+    name: openreply-worker
+    runtime: node
+    region: frankfurt
+    plan: 0.5c-512mb
+    autoDeployTrigger: off
+    # tsx, Prisma CLI and source aliases are required at runtime; retain dev dependencies.
+    buildCommand: npm ci --include=dev && npm run db:generate
+    # Idempotent; Prisma's advisory lock serializes concurrent migration commands.
+    preDeployCommand: npm run db:migrate
+    startCommand: npm run worker
+    maxShutdownDelaySeconds: 120
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: openreply-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: openreply-keyvalue
+          property: connectionString
+      - key: NEXTAUTH_URL
+        fromService:
+          type: web
+          name: openreply-web
+          envVarKey: NEXTAUTH_URL
+      - key: ENCRYPTION_KEY
+        fromService:
+          type: web
+          name: openreply-web
+          envVarKey: ENCRYPTION_KEY
+      - key: META_GRAPH_API_VERSION
+        value: v25.0
+      - key: INSTAGRAM_APP_ID
+        fromService:
+          type: web
+          name: openreply-web
+          envVarKey: INSTAGRAM_APP_ID
+      - key: INSTAGRAM_APP_SECRET
+        fromService:
+          type: web
+          name: openreply-web
+          envVarKey: INSTAGRAM_APP_SECRET
+
+  - type: keyvalue
+    name: openreply-keyvalue
+    region: frankfurt
+    plan: 256mb
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+
+databases:
+  - name: openreply-postgres
+    region: frankfurt
+    plan: 0.1c-256mb
+    postgresMajorVersion: "16"
+    databaseName: openreply
+    user: openreply
+    diskSizeGB: 5
+    ipAllowList: []
